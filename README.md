@@ -1,32 +1,114 @@
-# Voice Room
+# SimpleVoiceChat
 
-Голосовой чат с одной общей комнатой, без авторизации. Работает в браузере.
+Простой голосовой чат с одной общей комнатой, без регистрации. Работает в браузере, ничего ставить не нужно.
 
-- `server/` — Rust (axum): раздаёт сайт и сигналинг (`/ws`). Звук через него не идёт.
-- `client/` — React + TypeScript (Vite). Звук — WebRTC напрямую между участниками.
+- `server/` — Rust (axum): раздаёт сайт и работает как сигнальный сервер (`/ws`). Звук через него **не** идёт.
+- `client/` — React + TypeScript (Vite). Звук — WebRTC напрямую между участниками (Opus, эхо- и шумоподавление).
+- `docker-compose.yml` — всё вместе: приложение + Caddy (HTTPS) + coturn (TURN).
 
-## Деплой на сервер (voice.elysiac.fun)
+## Как это работает
 
-1. DNS: A-запись `voice.elysiac.fun` → IP сервера (если домен в Cloudflare — режим «DNS only», серое облако).
-2. Файрвол сервера: `80/tcp`, `443/tcp`, `443/udp`, `3478/tcp`, `3478/udp`, `49152-49252/udp`.
-3. На сервере (нужен Docker):
+```
+браузер ──(HTTPS + WebSocket)──► Caddy ──► Rust-сервер   (сайт и знакомство участников)
+браузер ◄────────── звук напрямую (P2P) ──────────► браузер
+                 └─ если P2P не пробился ─► coturn (ретранслятор)
+```
+
+Белый IP у участников не нужен. Белый IP нужен только серверу.
+
+## Что такое TURN-логин и пароль
+
+TURN-сервер (coturn) пересылает звук тем, у кого прямое соединение не получается (строгий NAT, мобильный интернет).
+Логин и пароль **вы придумываете сами**: нигде регистрироваться не нужно. Они просто защищают ваш TURN от чужих.
+Пароль можно сгенерировать так:
+
 ```bash
-git clone git@github.com:Foksif/SimpleVoiceChat.git voice-room && cd voice-room 
-cp .env.example .env && nano .env                          # SERVER_IP, пароль TURN
+openssl rand -hex 16
+```
+
+Оба значения вписываются в `.env` и автоматически попадают и в coturn, и в клиент.
+
+## Деплой
+
+### 1. DNS
+У вас свои DNS-серверы, поэтому добавьте запись в зону `elysiac.fun`:
+
+```
+voice    IN    A    <публичный IPv4 сервера>
+```
+
+(для BIND это строка в файле зоны; не забудьте поднять serial и перезагрузить зону). Если у сервера есть IPv6, можно добавить и `AAAA`.
+Проверка: `dig +short voice.elysiac.fun` должен вернуть IP сервера.
+
+### 2. Файрвол
+Откройте на сервере (и в панели хостинга, если она есть):
+
+| Порт | Протокол | Зачем |
+|---|---|---|
+| 80 | TCP | выдача сертификата |
+| 443 | TCP + UDP | сайт (HTTPS) |
+| 3478 | TCP + UDP | TURN |
+| 49152–49252 | UDP | звук через TURN |
+
+### 3. Запуск
+Нужны Docker и плагин Compose.
+
+```bash
+git clone git@github.com:Foksif/SimpleVoiceChat.git
+cd SimpleVoiceChat
+cp .env.example .env
+nano .env                      # SERVER_IP и TURN_PASSWORD
 docker compose up -d --build
 ```
-Через минуту: https://voice.elysiac.fun
 
-Обновление: `git pull && docker compose up -d --build`. Логи: `docker compose logs -f`.
+Через пару минут сайт откроется на https://voice.elysiac.fun.
+Первая сборка долгая (компилируется Rust), следующие быстрее.
 
-## Локально (Nix)
+### `.env`
+```
+SERVER_IP=<публичный IPv4 сервера>
+TURN_USER=voice
+TURN_PASSWORD=<результат openssl rand -hex 16>
+```
+
+## Обновление и обслуживание
+
+```bash
+git pull && docker compose up -d --build   # обновить
+docker compose logs -f                     # логи
+docker compose logs -f caddy               # если нет сертификата
+docker compose down                        # остановить
+```
+
+После изменения `.env` тоже делайте `docker compose up -d --build`: адрес TURN вшивается в клиент при сборке.
+
+## Если что-то не работает
+
+- **Нет HTTPS / ошибка сертификата.** Проверьте, что DNS-запись уже видна снаружи и порты 80/443 открыты (`docker compose logs caddy`).
+- **Браузер не просит микрофон.** Нужен именно HTTPS (или localhost).
+- **У участника «подключение…» или «нет связи».** Прямой путь не пробился, а TURN недоступен. Проверьте UDP 3478 и 49152–49252, а также что в `.env` верный `SERVER_IP`.
+- **Тишина при успешном подключении.** Проверьте микрофон в списке на экране входа: шкала уровня должна двигаться.
+
+## Локальная разработка
+
+Nix:
 ```bash
 nix-shell --run fish
-cd client && npm install && npm run build && cd ..
-cd server && cargo run --release        # http://localhost:3001
 ```
-Dev: `cargo run` в `server/` и `npm run dev` в `client/` → http://localhost:1420.
 
-## Важно знать
-- Mesh: каждый соединён с каждым (лимит 12, комфортно до 6–8).
-- TURN-логин/пароль вшиты в клиент, не публикуйте ссылку публично.
+Терминал 1:
+```bash
+cd server && cargo run          # :3001
+```
+Терминал 2:
+```bash
+cd client && npm install && npm run dev   # http://localhost:1420 (/ws проксируется на :3001)
+```
+
+Без Docker всё вместе: `cd client && npm run build`, затем `cd server && cargo run --release` и http://localhost:3001.
+
+## Ограничения
+
+- Mesh-топология: каждый соединён с каждым. Лимит 12 человек, комфортно до 6–8.
+- TURN-логин и пароль видны в коде сайта, поэтому не публикуйте ссылку на комнату открыто.
+- Автопереподключения нет: при обрыве приложение возвращает на экран входа.
