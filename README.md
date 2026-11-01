@@ -11,7 +11,7 @@
 2. Файрвол сервера: `80/tcp`, `443/tcp`, `443/udp`, `3478/tcp`, `3478/udp`, `49152-49252/udp`.
 3. На сервере (нужен Docker):
 ```bash
-git clone <ваш репозиторий> voice-room && cd voice-room   # или scp/rsync папки
+git clone git@github.com:Foksif/SimpleVoiceChat.git voice-room && cd voice-room 
 cp .env.example .env && nano .env                          # SERVER_IP, пароль TURN
 docker compose up -d --build
 ```
